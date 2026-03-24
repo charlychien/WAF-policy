@@ -9,7 +9,7 @@ Script file: `migration-custom-policy.sh`
 - Reads custom rules from source App Gateway WAF policy.
 - Recreates each rule in destination Front Door WAF policy.
 - Copies match conditions, values, transforms, and negate flag.
-- Maps App Gateway variable names to Front Door equivalents when needed:
+- Maps App Gateway waf rule variable names to Front Door equivalents when needed:
   - `RequestHeaders.*` -> `RequestHeader.*`
   - `RequestCookies.*` -> `Cookies.*`
 - Supports rerun safely (deletes destination rule before recreate).
