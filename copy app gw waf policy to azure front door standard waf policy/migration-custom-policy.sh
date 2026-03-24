@@ -3,10 +3,11 @@
 set -euo pipefail
 
 # --- Settings ---
-# --- source and destination policy details ---
+#source resource group where the AppGW WAF policy is located
 SOURCE_RG="rg-demo-colo"
 # this is application gateway WAF policy with custom rules to copy from
 SOURCE_POLICY="waf-appgw"
+#destination resource group where the Front Door WAF policy is located
 DEST_RG="rg-demo-colo"
 # this is front door WAF policy to copy rules to
 DEST_POLICY="forafd"
