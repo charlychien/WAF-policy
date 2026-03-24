@@ -4,13 +4,13 @@ set -euo pipefail
 
 # --- Settings ---
 #source resource group where the AppGW WAF policy is located
-SOURCE_RG="rg-demo-colo"
+SOURCE_RG="your-source-rg"
 # this is application gateway WAF policy with custom rules to copy from
-SOURCE_POLICY="waf-appgw"
+SOURCE_POLICY="your-source-appgw-waf-policy-name"
 #destination resource group where the Front Door WAF policy is located
-DEST_RG="rg-demo-colo"
+DEST_RG="your-dest-rg"
 # this is front door WAF policy to copy rules to
-DEST_POLICY="forafd"
+DEST_POLICY="your-dest-afd-waf-policy-name"
 
 # --- Color logs ---
 RED='\033[0;31m'
