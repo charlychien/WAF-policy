@@ -9,7 +9,7 @@ Script file: `migration-custom-policy.sh`
 - Reads custom rules from source App Gateway WAF policy.
 - Recreates each rule in destination Front Door WAF policy.
 - Copies match conditions, values, transforms, and negate flag.
-- Maps App Gateway waf rule variable names to Front Door equivalents when needed:
+- Maps App Gateway variable names to Front Door equivalents when needed:
   - `RequestHeaders.*` -> `RequestHeader.*`
   - `RequestCookies.*` -> `Cookies.*`
 - Supports rerun safely (deletes destination rule before recreate).
@@ -37,19 +37,25 @@ az extension add --name front-door --allow-preview true --yes
 Edit the variables at the top of `migration-custom-policy.sh`:
 
 ```bash
-SOURCE_RG="your-source-rg"
-SOURCE_POLICY="your-source-appgw-waf-policy-name"
-DEST_RG="your-dest-rg"
-DEST_POLICY="your-dest-afd-waf-policy-name"
+SOURCE_SUBSCRIPTION=""
+SOURCE_RG="rg-demo-colo"
+SOURCE_POLICY="waf-appgw"
+DEST_SUBSCRIPTION=""
+DEST_RG="rg-demo-colo"
+DEST_POLICY="forafd"
 ```
+
+- Set `SOURCE_SUBSCRIPTION` and `DEST_SUBSCRIPTION` when the source and destination policies are in different subscriptions.
+- Leave either subscription blank to use the currently active Azure subscription for that side.
+- The script logs the resolved source and destination subscriptions before validation so you can confirm the copy target/source context.
 
 ## Usage
 
 From this folder:
 
 ```bash
-chmod +x migration-custom-policy.sh.sh
-./migration-custom-policy.sh.sh
+chmod +x migration-custom-policy.sh
+./migration-custom-policy.sh
 ```
 
 ## Exit Codes
@@ -70,6 +76,7 @@ Check source custom rules:
 
 ```bash
 az network application-gateway waf-policy show \
+  --subscription "$SOURCE_SUBSCRIPTION" \
   -g "$SOURCE_RG" -n "$SOURCE_POLICY" \
   --query "customRules[].name" -o tsv
 ```
@@ -78,6 +85,7 @@ Check destination custom rules:
 
 ```bash
 az network front-door waf-policy show \
+  --subscription "$DEST_SUBSCRIPTION" \
   -g "$DEST_RG" -n "$DEST_POLICY" \
   --query "customRules.rules[].name" -o tsv
 ```
