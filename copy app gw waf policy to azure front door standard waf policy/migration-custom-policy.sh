@@ -3,14 +3,20 @@
 set -euo pipefail
 
 # --- Settings ---
+# source subscription where the AppGW WAF policy is located.
+# Leave empty to use the currently active Azure subscription.
+SOURCE_SUBSCRIPTION=subscriptionid
 #source resource group where the AppGW WAF policy is located
-SOURCE_RG="your-source-rg"
+SOURCE_RG="rg"
 # this is application gateway WAF policy with custom rules to copy from
-SOURCE_POLICY="your-source-appgw-waf-policy-name"
+SOURCE_POLICY="name-of-appgw-waf-policy"
+# destination subscription where the Front Door WAF policy is located.
+# Leave empty to use the currently active Azure subscription.
+DEST_SUBSCRIPTION=subscriptionid
 #destination resource group where the Front Door WAF policy is located
-DEST_RG="your-dest-rg"
+DEST_RG="rg"
 # this is front door WAF policy to copy rules to
-DEST_POLICY="your-dest-afd-waf-policy-name"
+DEST_POLICY="name-of-afd-waf-policy"
 
 # --- Color logs ---
 RED='\033[0;31m'
@@ -35,6 +41,45 @@ clean_tsv() {
   # Azure CLI on Windows often emits CRLF in TSV output; remove hidden CR.
   v="${v//$'\r'/}"
   printf '%s' "$v"
+}
+
+resolve_subscription() {
+  local configured_subscription="$1"
+  local resolved_subscription
+
+  if [ -n "$configured_subscription" ]; then
+    resolved_subscription=$(az account show \
+      --subscription "$configured_subscription" \
+      --query id \
+      --output tsv \
+      --only-show-errors 2>/dev/null || true)
+  else
+    resolved_subscription=$(az account show \
+      --query id \
+      --output tsv \
+      --only-show-errors 2>/dev/null || true)
+  fi
+
+  resolved_subscription=$(clean_tsv "$resolved_subscription")
+
+  if [ -z "$resolved_subscription" ]; then
+    if [ -n "$configured_subscription" ]; then
+      log_error "Unable to resolve subscription: $configured_subscription"
+    else
+      log_error "Unable to resolve the current Azure subscription. Run 'az login' and/or 'az account set'."
+    fi
+    exit 1
+  fi
+
+  printf '%s' "$resolved_subscription"
+}
+
+az_source() {
+  az "$@" --subscription "$SOURCE_SUBSCRIPTION_RESOLVED"
+}
+
+az_dest() {
+  az "$@" --subscription "$DEST_SUBSCRIPTION_RESOLVED"
 }
 
 require_command() {
@@ -96,26 +141,32 @@ normalize_match_variable() {
 require_command az
 check_frontdoor_cli
 
+SOURCE_SUBSCRIPTION_RESOLVED=$(resolve_subscription "$SOURCE_SUBSCRIPTION")
+DEST_SUBSCRIPTION_RESOLVED=$(resolve_subscription "$DEST_SUBSCRIPTION")
+
+log_info "Source policy: subscription=$SOURCE_SUBSCRIPTION_RESOLVED resourceGroup=$SOURCE_RG policy=$SOURCE_POLICY"
+log_info "Destination policy: subscription=$DEST_SUBSCRIPTION_RESOLVED resourceGroup=$DEST_RG policy=$DEST_POLICY"
+
 log_info "Validating source WAF policy..."
-if ! az network application-gateway waf-policy show \
+if ! az_source network application-gateway waf-policy show \
   --resource-group "$SOURCE_RG" \
   --name "$SOURCE_POLICY" \
   --only-show-errors >/dev/null; then
-  log_error "Source policy not found: $SOURCE_POLICY in $SOURCE_RG"
+  log_error "Source policy not found: $SOURCE_POLICY in $SOURCE_RG (subscription $SOURCE_SUBSCRIPTION_RESOLVED)"
   exit 1
 fi
 
 log_info "Validating destination Front Door WAF policy..."
-if ! az network front-door waf-policy show \
+if ! az_dest network front-door waf-policy show \
   --resource-group "$DEST_RG" \
   --name "$DEST_POLICY" \
   --only-show-errors >/dev/null; then
-  log_error "Destination policy not found: $DEST_POLICY in $DEST_RG"
+  log_error "Destination policy not found: $DEST_POLICY in $DEST_RG (subscription $DEST_SUBSCRIPTION_RESOLVED)"
   exit 1
 fi
 
 # Read custom rule names from source AppGW policy.
-mapfile -t rule_names < <(az network application-gateway waf-policy show \
+mapfile -t rule_names < <(az_source network application-gateway waf-policy show \
   --resource-group "$SOURCE_RG" \
   --name "$SOURCE_POLICY" \
   --query "customRules[].name" \
@@ -135,21 +186,21 @@ for rule_name in "${rule_names[@]}"; do
   [ -z "$rule_name" ] && continue
 
   # Base rule properties.
-  rule_priority=$(az network application-gateway waf-policy show \
+  rule_priority=$(az_source network application-gateway waf-policy show \
     --resource-group "$SOURCE_RG" \
     --name "$SOURCE_POLICY" \
     --query "customRules[?name=='$rule_name']|[0].priority" \
     --output tsv)
   rule_priority=$(clean_tsv "$rule_priority")
 
-  src_action=$(az network application-gateway waf-policy show \
+  src_action=$(az_source network application-gateway waf-policy show \
     --resource-group "$SOURCE_RG" \
     --name "$SOURCE_POLICY" \
     --query "customRules[?name=='$rule_name']|[0].action" \
     --output tsv)
   src_action=$(clean_tsv "$src_action")
 
-  src_type=$(az network application-gateway waf-policy show \
+  src_type=$(az_source network application-gateway waf-policy show \
     --resource-group "$SOURCE_RG" \
     --name "$SOURCE_POLICY" \
     --query "customRules[?name=='$rule_name']|[0].ruleType" \
@@ -159,7 +210,7 @@ for rule_name in "${rule_names[@]}"; do
   rule_action=$(map_action "$src_action")
   rule_type=$(map_rule_type "$src_type")
 
-  mapfile -t cond_operators < <(az network application-gateway waf-policy show \
+  mapfile -t cond_operators < <(az_source network application-gateway waf-policy show \
     --resource-group "$SOURCE_RG" \
     --name "$SOURCE_POLICY" \
     --query "customRules[?name=='$rule_name']|[0].matchConditions[].operator" \
@@ -173,7 +224,7 @@ for rule_name in "${rule_names[@]}"; do
   log_info "Migrating rule: $rule_name (priority=$rule_priority, action=$rule_action, type=$rule_type)"
 
   # Ensure deterministic reruns.
-  az network front-door waf-policy rule delete \
+  az_dest network front-door waf-policy rule delete \
     --resource-group "$DEST_RG" \
     --policy-name "$DEST_POLICY" \
     --name "$rule_name" \
@@ -184,7 +235,7 @@ for rule_name in "${rule_names[@]}"; do
   for c in "${!cond_operators[@]}"; do
     operator="${cond_operators[$c]}"
 
-    negate=$(az network application-gateway waf-policy show \
+    negate=$(az_source network application-gateway waf-policy show \
       --resource-group "$SOURCE_RG" \
       --name "$SOURCE_POLICY" \
       --query "customRules[?name=='$rule_name']|[0].matchConditions[$c].negationConditon" \
@@ -193,7 +244,7 @@ for rule_name in "${rule_names[@]}"; do
 
     # Backward compatibility if property name differs.
     if [ -z "$negate" ] || [ "$negate" = "null" ]; then
-      negate=$(az network application-gateway waf-policy show \
+      negate=$(az_source network application-gateway waf-policy show \
         --resource-group "$SOURCE_RG" \
         --name "$SOURCE_POLICY" \
         --query "customRules[?name=='$rule_name']|[0].matchConditions[$c].negationCondition" \
@@ -203,7 +254,7 @@ for rule_name in "${rule_names[@]}"; do
 
     [ -z "$negate" ] && negate="false"
 
-    mapfile -t values < <(az network application-gateway waf-policy show \
+    mapfile -t values < <(az_source network application-gateway waf-policy show \
       --resource-group "$SOURCE_RG" \
       --name "$SOURCE_POLICY" \
       --query "((customRules[?name=='$rule_name']|[0].matchConditions[$c].matchValues) || [])[]" \
@@ -214,13 +265,13 @@ for rule_name in "${rule_names[@]}"; do
       continue
     fi
 
-    mapfile -t transforms < <(az network application-gateway waf-policy show \
+    mapfile -t transforms < <(az_source network application-gateway waf-policy show \
       --resource-group "$SOURCE_RG" \
       --name "$SOURCE_POLICY" \
       --query "((customRules[?name=='$rule_name']|[0].matchConditions[$c].transforms) || [])[]" \
       --output tsv | tr -d '\r')
 
-    mapfile -t var_names < <(az network application-gateway waf-policy show \
+    mapfile -t var_names < <(az_source network application-gateway waf-policy show \
       --resource-group "$SOURCE_RG" \
       --name "$SOURCE_POLICY" \
       --query "customRules[?name=='$rule_name']|[0].matchConditions[$c].matchVariables[].variableName" \
@@ -234,7 +285,7 @@ for rule_name in "${rule_names[@]}"; do
     for v in "${!var_names[@]}"; do
       var_name="${var_names[$v]}"
 
-      selector=$(az network application-gateway waf-policy show \
+      selector=$(az_source network application-gateway waf-policy show \
         --resource-group "$SOURCE_RG" \
         --name "$SOURCE_POLICY" \
         --query "customRules[?name=='$rule_name']|[0].matchConditions[$c].matchVariables[$v].selector" \
@@ -249,7 +300,7 @@ for rule_name in "${rule_names[@]}"; do
 
       if [ "$created" = false ]; then
         create_cmd=(
-          az network front-door waf-policy rule create
+          az_dest network front-door waf-policy rule create
           --resource-group "$DEST_RG"
           --policy-name "$DEST_POLICY"
           --name "$rule_name"
@@ -272,14 +323,14 @@ for rule_name in "${rule_names[@]}"; do
         fi
 
         if [ "$rule_type" = "RateLimitRule" ]; then
-          src_duration=$(az network application-gateway waf-policy show \
+          src_duration=$(az_source network application-gateway waf-policy show \
             --resource-group "$SOURCE_RG" \
             --name "$SOURCE_POLICY" \
             --query "customRules[?name=='$rule_name']|[0].rateLimitDuration" \
             --output tsv)
           src_duration=$(clean_tsv "$src_duration")
 
-          src_threshold=$(az network application-gateway waf-policy show \
+          src_threshold=$(az_source network application-gateway waf-policy show \
             --resource-group "$SOURCE_RG" \
             --name "$SOURCE_POLICY" \
             --query "customRules[?name=='$rule_name']|[0].rateLimitThreshold" \
@@ -292,7 +343,7 @@ for rule_name in "${rule_names[@]}"; do
           else
             log_warn "Rule $rule_name is RateLimitRule but duration/threshold missing. Creating as MatchRule."
             create_cmd=(
-              az network front-door waf-policy rule create
+              az_dest network front-door waf-policy rule create
               --resource-group "$DEST_RG"
               --policy-name "$DEST_POLICY"
               --name "$rule_name"
@@ -325,7 +376,7 @@ for rule_name in "${rule_names[@]}"; do
         log_info "  -> Created rule with first condition ($match_var, $operator)"
       else
         add_cmd=(
-          az network front-door waf-policy rule match-condition add
+          az_dest network front-door waf-policy rule match-condition add
           --resource-group "$DEST_RG"
           --policy-name "$DEST_POLICY"
           --name "$rule_name"
@@ -360,7 +411,7 @@ for rule_name in "${rule_names[@]}"; do
   fi
 done
 
-mapfile -t dest_rule_names < <(az network front-door waf-policy show \
+mapfile -t dest_rule_names < <(az_dest network front-door waf-policy show \
   --resource-group "$DEST_RG" \
   --name "$DEST_POLICY" \
   --query "customRules.rules[].name" \
